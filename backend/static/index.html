@@ -1,0 +1,593 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>购票网站</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #0b1220;
+        --card: rgba(255, 255, 255, 0.08);
+        --text: rgba(255, 255, 255, 0.92);
+        --muted: rgba(255, 255, 255, 0.7);
+        --border: rgba(255, 255, 255, 0.14);
+        --primary: #7c3aed;
+        --success: #22c55e;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+        background: radial-gradient(1200px 800px at 10% 10%, rgba(124, 58, 237, 0.45), transparent 60%),
+          radial-gradient(900px 600px at 80% 20%, rgba(34, 197, 94, 0.35), transparent 55%), var(--bg);
+        color: var(--text);
+      }
+      a {
+        color: inherit;
+        text-decoration: none;
+      }
+      .container {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 24px;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        backdrop-filter: blur(10px);
+      }
+      .btn {
+        border: 1px solid var(--border);
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--text);
+        padding: 10px 14px;
+        border-radius: 12px;
+        cursor: pointer;
+      }
+      .btn.primary {
+        background: linear-gradient(135deg, rgba(124, 58, 237, 0.9), rgba(124, 58, 237, 0.6));
+        border-color: rgba(124, 58, 237, 0.5);
+      }
+      .btn.success {
+        background: linear-gradient(135deg, rgba(34, 197, 94, 0.9), rgba(34, 197, 94, 0.55));
+        border-color: rgba(34, 197, 94, 0.5);
+      }
+      .btn:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+      input {
+        width: 100%;
+        padding: 10px 12px;
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid var(--border);
+        color: var(--text);
+        outline: none;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .row {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 12px;
+      }
+      .modal-mask {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.55);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 18px;
+      }
+      .modal {
+        width: min(720px, 100%);
+        padding: 16px;
+      }
+      .kv {
+        display: grid;
+        grid-template-columns: 120px 1fr;
+        gap: 8px 12px;
+        font-size: 14px;
+      }
+      .kv .k {
+        color: var(--muted);
+      }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        border: 1px solid var(--border);
+        padding: 6px 10px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.06);
+        font-size: 13px;
+      }
+      .qr {
+        background: #fff;
+        border-radius: 12px;
+        padding: 10px;
+      }
+      h2 {
+        margin: 0;
+      }
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+
+    <!-- Vue 3（CDN，全局变量 Vue） -->
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <!-- QRCodeJS（本地静态文件，避免 CDN 404 / 外网不可用） -->
+    <script src="/static/vendor/qrcodejs.min.js"></script>
+    <script>
+      const API_BASE = location.origin
+      const LS_TOKEN = 'ticketing_token'
+      const LS_USER = 'ticketing_user'
+
+      function money(cents) {
+        return '￥' + (Number(cents || 0) / 100).toFixed(2)
+      }
+
+      async function apiFetch(path, { method = 'GET', body } = {}) {
+        const token = localStorage.getItem(LS_TOKEN) || ''
+        const headers = { 'Content-Type': 'application/json' }
+        if (token) headers.Authorization = 'Bearer ' + token
+        const res = await fetch(API_BASE + path, {
+          method,
+          headers,
+          body: body == null ? undefined : JSON.stringify(body)
+        })
+        const text = await res.text()
+        let data
+        try {
+          data = text ? JSON.parse(text) : null
+        } catch {
+          data = text
+        }
+        if (!res.ok) {
+          const msg = (data && data.message) || res.statusText || '请求失败'
+          const err = new Error(msg)
+          err.status = res.status
+          err.data = data
+          throw err
+        }
+        return data
+      }
+
+      const { createApp, reactive, computed, onMounted, ref, nextTick } = Vue
+
+      createApp({
+        setup() {
+          // 与 localStorage 同步的 token，供 isAuthed 依赖（纯读 localStorage 的 computed 不会随登出更新）
+          const authToken = ref(localStorage.getItem(LS_TOKEN) || '')
+          const isAuthed = computed(() => Boolean(authToken.value))
+
+          const state = reactive({
+            tab: 'tickets', // tickets | orders | receipt
+            tip: '',
+            loading: false,
+            tickets: [],
+            qty: {},
+            tips: {},
+            orders: [],
+            error: '',
+            lookupPhone: '',
+            ordersQueried: false,
+            pay: {
+              open: false,
+              ticket: null,
+              quantity: 1,
+              phone: '',
+              id_card: '',
+              full_name: '',
+              tip: ''
+            },
+            receipt: null,
+            receiptTip: ''
+          })
+
+          const qrHost = ref(null)
+
+          const user = computed(() => {
+            try {
+              return JSON.parse(localStorage.getItem(LS_USER) || 'null')
+            } catch {
+              return null
+            }
+          })
+
+          async function loadTickets() {
+            state.loading = true
+            state.error = ''
+            try {
+              const data = await apiFetch('/api/tickets')
+              state.tickets = data
+              data.forEach((t) => {
+                if (state.qty[t.id] == null) state.qty[t.id] = 1
+              })
+            } catch (e) {
+              state.error = e.message || String(e)
+            } finally {
+              state.loading = false
+            }
+          }
+
+          async function loadOrders() {
+            state.loading = true
+            state.error = ''
+            try {
+              const data = await apiFetch('/api/orders/me')
+              state.orders = data
+            } catch (e) {
+              state.error = e.message || String(e)
+            } finally {
+              state.loading = false
+            }
+          }
+
+          async function lookupOrdersByPhone() {
+            state.loading = true
+            state.tip = ''
+            state.error = ''
+            try {
+              const phone = String(state.lookupPhone || '').replace(/\D/g, '')
+              const data = await apiFetch('/api/orders/lookup', {
+                method: 'POST',
+                body: { phone }
+              })
+              state.orders = data
+              state.ordersQueried = true
+              state.tip = data.length ? '共 ' + data.length + ' 笔订单' : '该手机号下暂无订单'
+            } catch (e) {
+              state.error = e.message || String(e)
+              state.orders = []
+              state.ordersQueried = false
+            } finally {
+              state.loading = false
+            }
+          }
+
+          function logout() {
+            localStorage.removeItem(LS_TOKEN)
+            localStorage.removeItem(LS_USER)
+            authToken.value = ''
+            state.tab = 'tickets'
+            state.orders = []
+            state.ordersQueried = false
+            state.tip = ''
+            loadTickets()
+          }
+
+          function openPay(t) {
+            state.pay.open = true
+            state.pay.ticket = t
+            state.pay.quantity = Math.max(1, Number(state.qty[t.id] || 1))
+            state.pay.tip = ''
+            state.pay.phone = ''
+            state.pay.id_card = ''
+            state.pay.full_name = ''
+          }
+
+          function closePay() {
+            state.pay.open = false
+            state.pay.ticket = null
+            state.pay.tip = ''
+          }
+
+          async function ensureAuthForPay() {
+            if (isAuthed.value) return true
+            const phone = (state.pay.phone || '').trim()
+            const id_card = (state.pay.id_card || '').trim()
+            const full_name = (state.pay.full_name || '').trim()
+            if (!phone || !id_card || !full_name) {
+              state.pay.tip = '请填写手机号、身份证号与姓名'
+              return false
+            }
+            try {
+              const data = await apiFetch('/api/auth/session', {
+                method: 'POST',
+                body: { phone, id_card, full_name }
+              })
+              localStorage.setItem(LS_TOKEN, data.access_token)
+              localStorage.setItem(LS_USER, JSON.stringify(data.user))
+              authToken.value = data.access_token
+              return true
+            } catch (e) {
+              state.pay.tip = e.message || String(e)
+              return false
+            }
+          }
+
+          async function confirmPay() {
+            const t = state.pay.ticket
+            if (!t) return
+            state.loading = true
+            state.pay.tip = ''
+            state.receiptTip = ''
+            try {
+              const authed = await ensureAuthForPay()
+              if (!authed) return
+              const quantity = Math.max(1, Number(state.pay.quantity || 1))
+              const data = await apiFetch('/api/orders', {
+                method: 'POST',
+                body: { ticket_id: t.id, quantity }
+              })
+              closePay()
+              state.receipt = data
+              state.tab = 'receipt'
+              await loadTickets()
+
+              await nextTick()
+              if (qrHost.value) {
+                qrHost.value.innerHTML = ''
+                const payload = {
+                  order_id: data.id,
+                  ticket_id: data.ticket.id,
+                  quantity: data.quantity,
+                  total_cents: data.total_cents
+                }
+                const text = JSON.stringify(payload)
+                const QRCodeCtor = window.QRCode
+                if (typeof QRCodeCtor === 'undefined') {
+                  throw new Error('二维码库未加载成功：请确认 /static/vendor/qrcodejs.min.js 可访问')
+                }
+                void new QRCodeCtor(qrHost.value, {
+                  text,
+                  width: 220,
+                  height: 220,
+                  correctLevel: QRCodeCtor.CorrectLevel.M
+                })
+              }
+            } catch (e) {
+              const msg = e.message || String(e)
+              if (state.pay.open) {
+                state.pay.tip = msg
+              } else {
+                state.receiptTip = msg
+              }
+            } finally {
+              state.loading = false
+            }
+          }
+
+          function go(tab) {
+            state.tip = ''
+            state.error = ''
+            state.tab = tab
+            if (tab === 'tickets') loadTickets()
+            if (tab === 'orders') {
+              if (authToken.value) {
+                loadOrders()
+                state.ordersQueried = true
+              } else {
+                state.orders = []
+                state.ordersQueried = false
+                state.tip = ''
+              }
+            }
+          }
+
+          onMounted(() => {
+            state.tab = 'tickets'
+            loadTickets()
+          })
+
+          return {
+            state,
+            isAuthed,
+            user,
+            money,
+            go,
+            lookupOrdersByPhone,
+            logout,
+            openPay,
+            closePay,
+            confirmPay,
+            loadOrders,
+            qrHost,
+            API_BASE
+          }
+        },
+        template: `
+          <div class="container">
+            <header class="card" style="padding:14px 16px; display:flex; align-items:center; gap:12px">
+              <div style="font-weight:800; letter-spacing:.4px">购票网站</div>
+              <div class="muted" style="font-size:13px">API: <code>{{ API_BASE }}</code></div>
+              <nav style="display:flex; gap:10px; margin-left:auto; align-items:center">
+                <button class="btn" @click="go('tickets')">票务</button>
+                <button class="btn" @click="go('orders')">我的订单</button>
+                <button v-if="isAuthed" type="button" class="btn" @click="logout">退出（{{ user?.phone || '已核验' }}）</button>
+              </nav>
+            </header>
+
+            <main style="margin-top:16px">
+              <div v-if="state.tab==='tickets'" class="card" style="padding:18px">
+                <div style="display:flex; align-items:baseline; justify-content:space-between; gap:12px">
+                  <h2>票务列表</h2>
+                  <div class="muted" style="font-size:13px">共 {{ state.tickets.length }} 场 · 支付时填手机号、身份证、姓名</div>
+                </div>
+                <div style="height:12px"></div>
+                <div v-if="state.loading" class="muted">加载中...</div>
+                <div v-else-if="state.error" class="muted">加载失败：{{ state.error }}</div>
+                <div v-else class="grid">
+                  <div v-for="t in state.tickets" :key="t.id" class="card" style="padding:14px">
+                    <div style="font-weight:800">{{ t.title }}</div>
+                    <div class="muted" style="margin-top:6px">{{ t.venue }}</div>
+                    <div class="muted" style="margin-top:6px">{{ t.start_time }}</div>
+                    <div style="margin-top:10px; display:flex; align-items:center; justify-content:space-between; gap:10px">
+                      <div>
+                        <div style="font-weight:800">{{ money(t.price_cents) }}</div>
+                        <div class="muted" style="font-size:13px">余票：{{ t.stock }}</div>
+                      </div>
+                      <div style="display:flex; align-items:center; gap:8px">
+                        <input v-model.number="state.qty[t.id]" type="number" min="1" style="width:90px" />
+                        <button class="btn success" :disabled="t.stock<=0 || state.loading" @click="openPay(t)">购票</button>
+                      </div>
+                    </div>
+                    <div v-if="state.tips[t.id]" class="muted" style="margin-top:8px; font-size:13px">{{ state.tips[t.id] }}</div>
+                  </div>
+                </div>
+              </div>
+
+              <div v-else-if="state.tab==='receipt'" class="card" style="padding:18px">
+                <div style="display:flex; align-items:baseline; justify-content:space-between; gap:12px">
+                  <h2>支付成功 · 电子票</h2>
+                  <div class="badge">订单 #{{ state.receipt?.id }}</div>
+                </div>
+                <div style="height:12px"></div>
+
+                <div v-if="state.receiptTip" class="muted" style="margin-bottom:10px">
+                  二维码生成失败：{{ state.receiptTip }}
+                </div>
+
+                <div v-if="!state.receipt" class="muted">暂无电子票信息。</div>
+                <div v-else class="row" style="align-items:flex-start">
+                  <div class="card" style="padding:14px; flex:1; min-width:280px">
+                    <div class="kv">
+                      <div class="k">票名</div><div>{{ state.receipt.ticket.title }}</div>
+                      <div class="k">场馆</div><div>{{ state.receipt.ticket.venue }}</div>
+                      <div class="k">时间</div><div>{{ state.receipt.ticket.start_time }}</div>
+                      <div class="k">数量</div><div>{{ state.receipt.quantity }}</div>
+                      <div class="k">总价</div><div>{{ money(state.receipt.total_cents) }}</div>
+                      <div class="k">状态</div><div>{{ state.receipt.status }}</div>
+                      <div class="k">下单时间</div><div>{{ state.receipt.created_at }}</div>
+                    </div>
+                    <div style="height:12px"></div>
+                    <div class="muted" style="font-size:13px">二维码内容为订单信息 JSON（演示用）。</div>
+                  </div>
+
+                  <div class="card" style="padding:14px; width:280px">
+                    <div style="font-weight:800">验票二维码</div>
+                    <div class="muted" style="margin-top:6px; font-size:13px">现场扫码核验（模拟）</div>
+                    <div style="height:12px"></div>
+                    <div ref="qrHost" class="qr" style="display:inline-block"></div>
+                  </div>
+                </div>
+              </div>
+
+              <div v-else-if="state.tab==='orders'" class="card" style="padding:18px">
+                <div style="display:flex; align-items:baseline; justify-content:space-between; gap:12px">
+                  <h2>我的订单</h2>
+                  <button v-if="isAuthed" class="btn" :disabled="state.loading" @click="loadOrders()">刷新</button>
+                </div>
+                <p class="muted" style="margin:12px 0 0; font-size:14px">
+                  输入<strong>购票时使用的 11 位手机号</strong>即可查询订单及对应票务信息；无需身份证与姓名。
+                </p>
+                <div class="card" style="padding:14px; margin-top:14px">
+                  <div style="max-width:320px">
+                    <div class="muted" style="margin-bottom:6px">手机号</div>
+                    <input v-model.trim="state.lookupPhone" placeholder="11 位手机号" />
+                  </div>
+                  <div style="height:12px"></div>
+                  <button class="btn primary" :disabled="state.loading" @click="lookupOrdersByPhone">查询订单</button>
+                  <span class="muted" style="margin-left:10px">{{ state.tip }}</span>
+                </div>
+                <div v-if="isAuthed" class="muted" style="margin-top:10px; font-size:13px">
+                  已登录：{{ user?.phone }} · {{ user?.full_name }} · 证件尾号 {{ user?.id_card_last4 }}（「刷新」同步服务器）
+                </div>
+                <div style="height:12px"></div>
+                <div v-if="state.loading" class="muted">加载中...</div>
+                <div v-else-if="state.error" class="muted">加载失败：{{ state.error }}</div>
+                <div v-else-if="state.ordersQueried && state.orders.length===0" class="muted">暂无订单记录。</div>
+                <div v-else-if="state.orders.length>0" style="display:grid; gap:12px">
+                  <div v-for="o in state.orders" :key="o.id" class="card" style="padding:14px">
+                    <div style="display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap">
+                      <div style="font-weight:800">订单 #{{ o.id }}</div>
+                      <div class="muted">{{ o.created_at }}</div>
+                    </div>
+                    <div style="height:10px"></div>
+                    <div style="font-weight:800; font-size:16px">{{ o.ticket.title }}</div>
+                    <div class="muted" style="margin-top:8px">场馆：{{ o.ticket.venue }}</div>
+                    <div class="muted" style="margin-top:4px">演出时间：{{ o.ticket.start_time }}</div>
+                    <div class="muted" style="margin-top:4px">
+                      单价：{{ money(o.ticket.price_cents) }} · 购买数量：{{ o.quantity }} · 订单总价：{{ money(o.total_cents) }}
+                    </div>
+                    <div class="muted" style="margin-top:4px">状态：{{ o.status }}</div>
+                  </div>
+                </div>
+              </div>
+            </main>
+          </div>
+
+          <div v-if="state.pay.open" class="modal-mask" @click.self="closePay()">
+            <div class="card modal">
+              <div style="display:flex; justify-content:space-between; gap:10px; align-items:center">
+                <div style="font-weight:800">支付 / 实名</div>
+                <button class="btn" @click="closePay()">关闭</button>
+              </div>
+
+              <div style="height:12px"></div>
+
+              <div class="card" style="padding:14px">
+                <div style="font-weight:800">{{ state.pay.ticket?.title }}</div>
+                <div class="muted" style="margin-top:6px">{{ state.pay.ticket?.venue }} · {{ state.pay.ticket?.start_time }}</div>
+                <div style="height:10px"></div>
+                <div class="row" style="align-items:center">
+                  <div style="min-width:240px">
+                    <div class="muted" style="margin-bottom:6px">购买数量</div>
+                    <input v-model.number="state.pay.quantity" type="number" min="1" />
+                  </div>
+                  <div style="flex:1">
+                    <div class="muted">应付金额</div>
+                    <div style="font-weight:900; font-size:22px; margin-top:6px">
+                      {{ money((state.pay.ticket?.price_cents || 0) * (state.pay.quantity || 1)) }}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div style="height:12px"></div>
+              <div v-if="isAuthed" class="muted" style="font-size:13px">
+                当前身份：<strong>{{ user?.phone }}</strong> · {{ user?.full_name }} · 证件尾号 {{ user?.id_card_last4 }}
+              </div>
+
+              <div v-if="!isAuthed" class="card" style="padding:14px; margin-top:12px">
+                <div style="font-weight:800; margin-bottom:8px">购票人信息</div>
+                <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))">
+                  <div>
+                    <div class="muted" style="margin-bottom:6px">手机号</div>
+                    <input v-model.trim="state.pay.phone" placeholder="11 位手机号" />
+                  </div>
+                  <div>
+                    <div class="muted" style="margin-bottom:6px">身份证号</div>
+                    <input v-model.trim="state.pay.id_card" placeholder="18 位或 15 位" />
+                  </div>
+                  <div style="grid-column:1/-1">
+                    <div class="muted" style="margin-bottom:6px">姓名</div>
+                    <input v-model.trim="state.pay.full_name" placeholder="与证件一致" />
+                  </div>
+                </div>
+              </div>
+
+              <div style="height:12px"></div>
+
+              <div class="row">
+                <button class="btn success" :disabled="state.loading" @click="confirmPay()">确认支付</button>
+                <div class="muted" style="align-self:center">{{ state.pay.tip }}</div>
+              </div>
+              <div class="muted" style="margin-top:10px; font-size:12px">
+                说明：模拟支付。未登录时将先核验手机号、身份证与姓名（新用户自动建档），再创建订单并生成电子票二维码。
+              </div>
+            </div>
+          </div>
+        `
+      }).mount('#app')
+    </script>
+  </body>
+</html>
+
